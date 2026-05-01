@@ -51,6 +51,8 @@ Para ver mensagens recebidas pelo WhatsApp que precisam de resposta:
 python3 lead_agent/lead_agent.py whatsapp-inbox
 ```
 
+Quando `REVIEWER_WHATSAPP` estiver configurado, cada mensagem nova recebida de um paciente gera tambem uma mensagem de revisao para esse numero. Nesta fase, o agente nao responde automaticamente ao paciente.
+
 Para abrir uma lead no WhatsApp Web com a mensagem preparada:
 
 ```bash

@@ -27,6 +27,7 @@ DEFAULT_PROCESSED = ROOT / "data" / "processed_message_ids.txt"
 DEFAULT_WHATSAPP_WEBHOOK_LOG = ROOT / "data" / "whatsapp_webhooks.jsonl"
 DEFAULT_WHATSAPP_INBOX = ROOT / "data" / "pending_whatsapp.jsonl"
 DEFAULT_360DIALOG_BASE_URL = "https://waba-v2.360dialog.io"
+DEFAULT_REVIEWER_PHONE = "351913767718"
 
 
 @dataclass
@@ -247,10 +248,10 @@ def suggested_reply(name: str, language: str, channel: str) -> str:
             "Do you have a preference or any specific dates in mind?"
         )
     return (
-        f"Ola{greeting_name}! Sou a Catia Correia, assistente pessoal do Dr. Luis Antunes.\n\n"
+        f"Olá{greeting_name}! Sou a Cátia Correia, assistente pessoal do Dr. Luís Antunes.\n\n"
         "Podemos agendar uma consulta com o Dr. Antunes para discutir o seu caso. "
-        "A consulta pode ser presencial em Lisboa ou por videochamada. O valor e de 150 EUR.\n\n"
-        "Tem preferencia de datas ou horario?"
+        "A consulta pode ser presencial em Lisboa ou por videochamada. O valor é de 150€.\n\n"
+        "Tem preferência de datas ou horário?"
     )
 
 
@@ -548,6 +549,19 @@ def whatsapp_360dialog_request(path: str, payload: dict | None = None, method: s
         raise SystemExit(f"Erro 360dialog API {error.code}: {details}") from error
 
 
+def whatsapp_text_payload(phone: str, body: str) -> dict:
+    return {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": phone,
+        "type": "text",
+        "text": {
+            "preview_url": False,
+            "body": body,
+        },
+    }
+
+
 def whatsapp_api_check() -> None:
     load_env_file(ROOT / ".env")
     provider = env("WHATSAPP_PROVIDER", "meta").strip().lower()
@@ -620,16 +634,7 @@ def whatsapp_send_text(index: int, confirm: bool) -> None:
     if not phone:
         raise SystemExit("Esta lead nao tem telefone valido para WhatsApp.")
 
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": phone,
-        "type": "text",
-        "text": {
-            "preview_url": False,
-            "body": item.get("suggested_reply", ""),
-        },
-    }
+    payload = whatsapp_text_payload(phone, item.get("suggested_reply", ""))
 
     if not confirm:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -724,6 +729,7 @@ class WhatsAppWebhookHandler(BaseHTTPRequestHandler):
         pending = extract_pending_whatsapp_messages(event["body"], event["received_at"])
         inbox_path = Path(env("WHATSAPP_INBOX_PATH", str(DEFAULT_WHATSAPP_INBOX)))
         append_whatsapp_inbox(inbox_path, pending)
+        notify_reviewer(pending)
         print_webhook_summary(event["body"])
 
         self.send_response(200)
@@ -807,6 +813,44 @@ def show_whatsapp_inbox(limit: int) -> None:
         print(f"Mensagem: {item.get('text')}")
         print("Resposta sugerida:")
         print(item.get("suggested_reply", ""))
+
+
+def reviewer_phone() -> str:
+    return whatsapp_phone(env("REVIEWER_WHATSAPP", DEFAULT_REVIEWER_PHONE))
+
+
+def notify_reviewer(messages: list[WhatsAppPendingMessage]) -> None:
+    reviewer = reviewer_phone()
+    if not reviewer:
+        return
+
+    clinic_number = whatsapp_phone(env("WHATSAPP_CLINIC_NUMBER", "351938336026"))
+    for message in messages:
+        if whatsapp_phone(message.from_phone) == reviewer:
+            continue
+        if clinic_number and whatsapp_phone(message.from_phone) == clinic_number:
+            continue
+
+        review_text = format_review_message(message)
+        try:
+            whatsapp_api_request(whatsapp_text_payload(reviewer, review_text))
+            print(f"[review] enviado para {reviewer}: {message.from_phone}", flush=True)
+        except SystemExit as error:
+            print(f"[review] erro ao enviar para {reviewer}: {error}", flush=True)
+
+
+def format_review_message(message: WhatsAppPendingMessage) -> str:
+    patient = message.profile_name or "(sem nome)"
+    return (
+        "Nova mensagem WhatsApp para validar\n\n"
+        f"Paciente: {patient}\n"
+        f"Telefone: +{message.from_phone}\n"
+        f"Mensagem:\n{message.text}\n\n"
+        "Sugestão de resposta:\n"
+        f"{message.suggested_reply}\n\n"
+        "Por agora esta mensagem é só para validação. "
+        "O agente ainda não respondeu automaticamente ao paciente."
+    )
 
 
 def webhook_server(host: str, port: int) -> None:

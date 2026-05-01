@@ -20,3 +20,7 @@ services:
         value: /tmp/whatsapp_webhooks.jsonl
       - key: WHATSAPP_INBOX_PATH
         value: /tmp/pending_whatsapp.jsonl
+      - key: WHATSAPP_CLINIC_NUMBER
+        value: 351938336026
+      - key: REVIEWER_WHATSAPP
+        value: 351913767718
