@@ -45,6 +45,12 @@ Para ver a fila:
 python3 lead_agent/lead_agent.py show
 ```
 
+Para ver mensagens recebidas pelo WhatsApp que precisam de resposta:
+
+```bash
+python3 lead_agent/lead_agent.py whatsapp-inbox
+```
+
 Para abrir uma lead no WhatsApp Web com a mensagem preparada:
 
 ```bash

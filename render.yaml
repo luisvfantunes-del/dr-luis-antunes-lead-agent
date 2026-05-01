@@ -18,3 +18,5 @@ services:
         sync: false
       - key: WHATSAPP_WEBHOOK_LOG
         value: /tmp/whatsapp_webhooks.jsonl
+      - key: WHATSAPP_INBOX_PATH
+        value: /tmp/pending_whatsapp.jsonl

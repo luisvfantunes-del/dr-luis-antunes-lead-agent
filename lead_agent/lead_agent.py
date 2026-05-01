@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_QUEUE = ROOT / "data" / "pending_leads.jsonl"
 DEFAULT_PROCESSED = ROOT / "data" / "processed_message_ids.txt"
 DEFAULT_WHATSAPP_WEBHOOK_LOG = ROOT / "data" / "whatsapp_webhooks.jsonl"
+DEFAULT_WHATSAPP_INBOX = ROOT / "data" / "pending_whatsapp.jsonl"
 DEFAULT_360DIALOG_BASE_URL = "https://waba-v2.360dialog.io"
 
 
@@ -42,6 +43,19 @@ class LeadDraft:
     status: str
     suggested_reply: str
     raw_excerpt: str
+
+
+@dataclass
+class WhatsAppPendingMessage:
+    received_at: str
+    message_id: str
+    from_phone: str
+    profile_name: str
+    message_type: str
+    text: str
+    language: str
+    suggested_reply: str
+    status: str
 
 
 def load_env_file(path: Path) -> None:
@@ -240,6 +254,49 @@ def suggested_reply(name: str, language: str, channel: str) -> str:
     )
 
 
+def suggested_whatsapp_reply(name: str, text: str, message_type: str) -> str:
+    language = language_from_text(text)
+    first_name = (name or "").split()[0]
+    greeting_name = f" {first_name}" if first_name else ""
+
+    if message_type != "text":
+        if language == "EN":
+            return (
+                f"Hello{greeting_name}, thank you. I will review this with Dr. Antunes "
+                "and get back to you as soon as possible."
+            )
+        return (
+            f"Olá{greeting_name}, obrigada. Vou verificar com o Dr. Antunes "
+            "e volto a entrar em contacto assim que possível."
+        )
+
+    lower = text.lower()
+    asks_consult = any(
+        hit in lower
+        for hit in [
+            "consulta",
+            "marcar",
+            "agendar",
+            "appointment",
+            "consultation",
+            "schedule",
+            "book",
+        ]
+    )
+    if asks_consult:
+        return suggested_reply(name, language, "WhatsApp")
+
+    if language == "EN":
+        return (
+            f"Hello{greeting_name}, thank you for your message. "
+            "I will check this and get back to you shortly."
+        )
+    return (
+        f"Olá{greeting_name}, obrigada pela sua mensagem. "
+        "Vou verificar e volto a entrar em contacto em breve."
+    )
+
+
 def whatsapp_phone(phone: str) -> str:
     cleaned = clean_phone(phone)
     digits = re.sub(r"\D", "", cleaned)
@@ -301,6 +358,13 @@ def append_queue(path: Path, drafts: Iterable[LeadDraft]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         for draft in drafts:
             handle.write(json.dumps(asdict(draft), ensure_ascii=False) + "\n")
+
+
+def append_whatsapp_inbox(path: Path, messages: Iterable[WhatsAppPendingMessage]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for message in messages:
+            handle.write(json.dumps(asdict(message), ensure_ascii=False) + "\n")
 
 
 def fetch(limit: int) -> None:
@@ -657,6 +721,9 @@ class WhatsAppWebhookHandler(BaseHTTPRequestHandler):
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
+        pending = extract_pending_whatsapp_messages(event["body"], event["received_at"])
+        inbox_path = Path(env("WHATSAPP_INBOX_PATH", str(DEFAULT_WHATSAPP_INBOX)))
+        append_whatsapp_inbox(inbox_path, pending)
         print_webhook_summary(event["body"])
 
         self.send_response(200)
@@ -684,6 +751,64 @@ def print_webhook_summary(body: dict) -> None:
                 print(f"[webhook] {field} | {sender} | {message_type}: {content}", flush=True)
 
 
+def extract_pending_whatsapp_messages(body: dict, received_at: str) -> list[WhatsAppPendingMessage]:
+    pending: list[WhatsAppPendingMessage] = []
+    for entry in body.get("entry", []):
+        for change in entry.get("changes", []):
+            if change.get("field") != "messages":
+                continue
+            value = change.get("value", {})
+            contact_names = {
+                contact.get("wa_id", ""): contact.get("profile", {}).get("name", "")
+                for contact in value.get("contacts", [])
+            }
+            for message in value.get("messages", []):
+                message_type = message.get("type", "")
+                sender = message.get("from", "")
+                text = ""
+                if message_type == "text":
+                    text = message.get("text", {}).get("body", "")
+                elif message_type in {"image", "document", "audio", "video"}:
+                    text = message.get(message_type, {}).get("filename") or f"[{message_type}]"
+                else:
+                    text = f"[{message_type or 'mensagem'}]"
+
+                profile_name = contact_names.get(sender, "")
+                language = language_from_text(text)
+                pending.append(
+                    WhatsAppPendingMessage(
+                        received_at=received_at,
+                        message_id=message.get("id", ""),
+                        from_phone=sender,
+                        profile_name=profile_name,
+                        message_type=message_type,
+                        text=text,
+                        language=language,
+                        suggested_reply=suggested_whatsapp_reply(profile_name, text, message_type),
+                        status="Aguardando validação",
+                    )
+                )
+    return pending
+
+
+def show_whatsapp_inbox(limit: int) -> None:
+    load_env_file(ROOT / ".env")
+    inbox_path = Path(env("WHATSAPP_INBOX_PATH", str(DEFAULT_WHATSAPP_INBOX)))
+    if not inbox_path.exists():
+        print("Fila WhatsApp vazia.")
+        return
+    rows = [
+        json.loads(line)
+        for line in inbox_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    for index, item in enumerate(rows[-limit:], start=max(1, len(rows) - limit + 1)):
+        print(f"\n#{index} {item.get('profile_name') or '(sem nome)'} | {item.get('from_phone')} | {item.get('message_type')}")
+        print(f"Mensagem: {item.get('text')}")
+        print("Resposta sugerida:")
+        print(item.get("suggested_reply", ""))
+
+
 def webhook_server(host: str, port: int) -> None:
     load_env_file(ROOT / ".env")
     server = HTTPServer((host, port), WhatsAppWebhookHandler)
@@ -698,6 +823,8 @@ def main() -> None:
     fetch_parser = sub.add_parser("fetch", help="Ler emails nao lidos e criar fila de revisao")
     fetch_parser.add_argument("--limit", type=int, default=20)
     sub.add_parser("show", help="Mostrar fila de revisao")
+    inbox_parser = sub.add_parser("whatsapp-inbox", help="Mostrar mensagens WhatsApp pendentes")
+    inbox_parser.add_argument("--limit", type=int, default=20)
     whatsapp_parser = sub.add_parser("whatsapp", help="Abrir WhatsApp Web com uma lead da fila")
     whatsapp_parser.add_argument("index", type=int, help="Numero da lead na fila, como mostrado por show")
     whatsapp_parser.add_argument("--no-open", action="store_true", help="So mostrar o link, sem abrir o browser")
@@ -722,6 +849,8 @@ def main() -> None:
         fetch(args.limit)
     elif args.cmd == "show":
         show()
+    elif args.cmd == "whatsapp-inbox":
+        show_whatsapp_inbox(args.limit)
     elif args.cmd == "whatsapp":
         whatsapp(args.index, open_browser=not args.no_open)
     elif args.cmd == "api-send":
