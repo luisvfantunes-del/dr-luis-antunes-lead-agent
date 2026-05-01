@@ -53,6 +53,14 @@ python3 lead_agent/lead_agent.py whatsapp-inbox
 
 Quando `REVIEWER_WHATSAPP` estiver configurado, cada mensagem nova recebida de um paciente gera tambem uma mensagem de revisao para esse numero. Nesta fase, o agente nao responde automaticamente ao paciente.
 
+Cada sugestao vem com um ID, por exemplo `W0001`. Para aprovar e enviar a resposta sugerida ao paciente, responder no WhatsApp:
+
+```text
+OK W0001
+```
+
+Tambem e possivel responder apenas `OK`, mas nesse caso o agente aprova a resposta pendente mais recente.
+
 Para abrir uma lead no WhatsApp Web com a mensagem preparada:
 
 ```bash

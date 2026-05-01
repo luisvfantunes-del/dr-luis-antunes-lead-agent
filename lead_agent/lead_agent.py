@@ -26,6 +26,7 @@ DEFAULT_QUEUE = ROOT / "data" / "pending_leads.jsonl"
 DEFAULT_PROCESSED = ROOT / "data" / "processed_message_ids.txt"
 DEFAULT_WHATSAPP_WEBHOOK_LOG = ROOT / "data" / "whatsapp_webhooks.jsonl"
 DEFAULT_WHATSAPP_INBOX = ROOT / "data" / "pending_whatsapp.jsonl"
+DEFAULT_WHATSAPP_APPROVALS = ROOT / "data" / "pending_whatsapp_approvals.json"
 DEFAULT_360DIALOG_BASE_URL = "https://waba-v2.360dialog.io"
 DEFAULT_REVIEWER_PHONE = "351913767718"
 
@@ -57,6 +58,7 @@ class WhatsAppPendingMessage:
     language: str
     suggested_reply: str
     status: str
+    approval_id: str = ""
 
 
 def load_env_file(path: Path) -> None:
@@ -366,6 +368,87 @@ def append_whatsapp_inbox(path: Path, messages: Iterable[WhatsAppPendingMessage]
     with path.open("a", encoding="utf-8") as handle:
         for message in messages:
             handle.write(json.dumps(asdict(message), ensure_ascii=False) + "\n")
+
+
+def approvals_path() -> Path:
+    return Path(env("WHATSAPP_APPROVALS_PATH", str(DEFAULT_WHATSAPP_APPROVALS)))
+
+
+def load_approvals() -> list[dict]:
+    path = approvals_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def save_approvals(items: list[dict]) -> None:
+    path = approvals_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def next_approval_id(items: list[dict]) -> str:
+    max_seen = 0
+    for item in items:
+        match = re.match(r"^W(\d+)$", str(item.get("approval_id", "")))
+        if match:
+            max_seen = max(max_seen, int(match.group(1)))
+    return f"W{max_seen + 1:04d}"
+
+
+def create_whatsapp_approval(message: WhatsAppPendingMessage) -> str:
+    items = load_approvals()
+    for item in items:
+        if item.get("source_message_id") == message.message_id and item.get("status") == "pending":
+            return str(item.get("approval_id", ""))
+
+    approval_id = next_approval_id(items)
+    items.append(
+        {
+            "approval_id": approval_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_message_id": message.message_id,
+            "patient_phone": whatsapp_phone(message.from_phone),
+            "patient_name": message.profile_name,
+            "patient_message": message.text,
+            "suggested_reply": message.suggested_reply,
+            "status": "pending",
+            "sent_at": "",
+            "sent_result": {},
+        }
+    )
+    save_approvals(items)
+    return approval_id
+
+
+def pending_approval_by_id(approval_id: str | None) -> dict | None:
+    items = load_approvals()
+    if approval_id:
+        wanted = approval_id.upper()
+        for item in items:
+            if item.get("approval_id") == wanted and item.get("status") == "pending":
+                return item
+        return None
+
+    for item in reversed(items):
+        if item.get("status") == "pending":
+            return item
+    return None
+
+
+def mark_approval_sent(approval_id: str, result: dict) -> None:
+    items = load_approvals()
+    for item in items:
+        if item.get("approval_id") == approval_id:
+            item["status"] = "sent"
+            item["sent_at"] = datetime.now(timezone.utc).isoformat()
+            item["sent_result"] = result
+            break
+    save_approvals(items)
 
 
 def fetch(limit: int) -> None:
@@ -726,6 +809,7 @@ class WhatsAppWebhookHandler(BaseHTTPRequestHandler):
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
+        handle_reviewer_commands(event["body"])
         pending = extract_pending_whatsapp_messages(event["body"], event["received_at"])
         inbox_path = Path(env("WHATSAPP_INBOX_PATH", str(DEFAULT_WHATSAPP_INBOX)))
         append_whatsapp_inbox(inbox_path, pending)
@@ -759,6 +843,8 @@ def print_webhook_summary(body: dict) -> None:
 
 def extract_pending_whatsapp_messages(body: dict, received_at: str) -> list[WhatsAppPendingMessage]:
     pending: list[WhatsAppPendingMessage] = []
+    reviewer = reviewer_phone()
+    clinic_number = whatsapp_phone(env("WHATSAPP_CLINIC_NUMBER", "351938336026"))
     for entry in body.get("entry", []):
         for change in entry.get("changes", []):
             if change.get("field") != "messages":
@@ -771,6 +857,11 @@ def extract_pending_whatsapp_messages(body: dict, received_at: str) -> list[What
             for message in value.get("messages", []):
                 message_type = message.get("type", "")
                 sender = message.get("from", "")
+                normalized_sender = whatsapp_phone(sender)
+                if reviewer and normalized_sender == reviewer:
+                    continue
+                if clinic_number and normalized_sender == clinic_number:
+                    continue
                 text = ""
                 if message_type == "text":
                     text = message.get("text", {}).get("body", "")
@@ -819,6 +910,76 @@ def reviewer_phone() -> str:
     return whatsapp_phone(env("REVIEWER_WHATSAPP", DEFAULT_REVIEWER_PHONE))
 
 
+def handle_reviewer_commands(body: dict) -> None:
+    reviewer = reviewer_phone()
+    if not reviewer:
+        return
+
+    for entry in body.get("entry", []):
+        for change in entry.get("changes", []):
+            if change.get("field") != "messages":
+                continue
+            for message in change.get("value", {}).get("messages", []):
+                if whatsapp_phone(message.get("from", "")) != reviewer:
+                    continue
+                text = message.get("text", {}).get("body", "") if message.get("type") == "text" else ""
+                if not text:
+                    continue
+                match = re.match(r"^\s*ok(?:\s+(W\d+))?\s*$", text, flags=re.I)
+                if not match:
+                    print(f"[review] comando ignorado do revisor: {text}", flush=True)
+                    continue
+
+                requested_id = match.group(1).upper() if match.group(1) else None
+                approval = pending_approval_by_id(requested_id)
+                if not approval:
+                    help_text = "Não encontrei nenhuma resposta pendente"
+                    if requested_id:
+                        help_text += f" com o ID {requested_id}"
+                    help_text += "."
+                    try:
+                        whatsapp_api_request(whatsapp_text_payload(reviewer, help_text))
+                    except SystemExit as error:
+                        print(f"[review] erro ao avisar revisor: {error}", flush=True)
+                    print(f"[review] aprovação não encontrada: {requested_id or '(última)'}", flush=True)
+                    continue
+
+                approval_id = str(approval.get("approval_id", ""))
+                patient_phone = whatsapp_phone(str(approval.get("patient_phone", "")))
+                suggested_reply = str(approval.get("suggested_reply", ""))
+                if not patient_phone or not suggested_reply:
+                    try:
+                        whatsapp_api_request(
+                            whatsapp_text_payload(reviewer, f"Não consegui enviar {approval_id}: faltam dados.")
+                        )
+                    except SystemExit as error:
+                        print(f"[review] erro ao avisar revisor: {error}", flush=True)
+                    print(f"[review] aprovação incompleta: {approval_id}", flush=True)
+                    continue
+
+                try:
+                    result = whatsapp_api_request(whatsapp_text_payload(patient_phone, suggested_reply))
+                    mark_approval_sent(approval_id, result)
+
+                    patient_name = approval.get("patient_name") or patient_phone
+                    confirmation = (
+                        "Enviado ✅\n"
+                        f"ID: {approval_id}\n"
+                        f"Paciente: {patient_name}\n"
+                        f"Telefone: +{patient_phone}"
+                    )
+                    whatsapp_api_request(whatsapp_text_payload(reviewer, confirmation))
+                    print(f"[review] aprovado {approval_id} e enviado para {patient_phone}", flush=True)
+                except SystemExit as error:
+                    try:
+                        whatsapp_api_request(
+                            whatsapp_text_payload(reviewer, f"Não consegui enviar {approval_id}: {error}")
+                        )
+                    except SystemExit as notify_error:
+                        print(f"[review] erro ao avisar revisor: {notify_error}", flush=True)
+                    print(f"[review] erro ao aprovar {approval_id}: {error}", flush=True)
+
+
 def notify_reviewer(messages: list[WhatsAppPendingMessage]) -> None:
     reviewer = reviewer_phone()
     if not reviewer:
@@ -831,6 +992,7 @@ def notify_reviewer(messages: list[WhatsAppPendingMessage]) -> None:
         if clinic_number and whatsapp_phone(message.from_phone) == clinic_number:
             continue
 
+        message.approval_id = create_whatsapp_approval(message)
         review_text = format_review_message(message)
         try:
             whatsapp_api_request(whatsapp_text_payload(reviewer, review_text))
@@ -843,13 +1005,14 @@ def format_review_message(message: WhatsAppPendingMessage) -> str:
     patient = message.profile_name or "(sem nome)"
     return (
         "Nova mensagem WhatsApp para validar\n\n"
+        f"ID: {message.approval_id}\n"
         f"Paciente: {patient}\n"
         f"Telefone: +{message.from_phone}\n"
         f"Mensagem:\n{message.text}\n\n"
         "Sugestão de resposta:\n"
         f"{message.suggested_reply}\n\n"
-        "Por agora esta mensagem é só para validação. "
-        "O agente ainda não respondeu automaticamente ao paciente."
+        f"Responde OK {message.approval_id} para enviar esta resposta ao paciente.\n"
+        "Também podes responder só OK para enviar a resposta pendente mais recente."
     )
 
 
