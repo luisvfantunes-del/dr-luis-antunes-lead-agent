@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+node_modules/
+
+# Secrets locais
+lead_agent/.env
+
+# Dados privados/temporarios
+lead_agent/data/*.jsonl
+lead_agent/data/*.txt
+
+# Caches
+.pytest_cache/

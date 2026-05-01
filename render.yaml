@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: dr-luis-antunes-lead-agent
+    runtime: python
+    region: frankfurt
+    plan: starter
+    buildCommand: "python3 -m py_compile lead_agent/lead_agent.py"
+    startCommand: "python3 lead_agent/lead_agent.py webhook --host 0.0.0.0"
+    healthCheckPath: /health
+    envVars:
+      - key: WHATSAPP_PROVIDER
+        value: 360dialog
+      - key: D360_BASE_URL
+        value: https://waba-v2.360dialog.io
+      - key: D360_API_KEY
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_WEBHOOK_LOG
+        value: /tmp/whatsapp_webhooks.jsonl
