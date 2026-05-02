@@ -61,6 +61,13 @@ OK W0001
 
 Tambem e possivel responder apenas `OK`, mas nesse caso o agente aprova a resposta pendente mais recente.
 
+Se `GOOGLE_SHEETS_WEBHOOK_URL` estiver configurado, o agente tambem sincroniza o tracker em Google Sheets:
+
+- quando entra uma nova mensagem de paciente, cria/atualiza a lead como `Aguardando validação`;
+- quando a resposta e aprovada e enviada ao paciente, muda para `Aguardando resposta`.
+
+Ver `google_sheets_apps_script.md` para criar a ponte do Google Sheets.
+
 Para abrir uma lead no WhatsApp Web com a mensagem preparada:
 
 ```bash

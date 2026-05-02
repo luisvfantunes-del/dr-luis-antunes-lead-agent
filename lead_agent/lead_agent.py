@@ -29,6 +29,7 @@ DEFAULT_WHATSAPP_INBOX = ROOT / "data" / "pending_whatsapp.jsonl"
 DEFAULT_WHATSAPP_APPROVALS = ROOT / "data" / "pending_whatsapp_approvals.json"
 DEFAULT_360DIALOG_BASE_URL = "https://waba-v2.360dialog.io"
 DEFAULT_REVIEWER_PHONE = "351913767718"
+DEFAULT_GOOGLE_SHEETS_TIMEOUT = 15
 
 
 @dataclass
@@ -449,6 +450,75 @@ def mark_approval_sent(approval_id: str, result: dict) -> None:
             item["sent_result"] = result
             break
     save_approvals(items)
+
+
+def google_sheets_enabled() -> bool:
+    return bool(env("GOOGLE_SHEETS_WEBHOOK_URL"))
+
+
+def google_sheets_post(action: str, payload: dict) -> None:
+    url = env("GOOGLE_SHEETS_WEBHOOK_URL")
+    if not url:
+        return
+
+    body = {
+        "secret": env("GOOGLE_SHEETS_WEBHOOK_SECRET"),
+        "action": action,
+        "payload": payload,
+    }
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=DEFAULT_GOOGLE_SHEETS_TIMEOUT) as response:
+            response.read()
+    except Exception as error:
+        # The WhatsApp flow must not fail just because the tracker is temporarily unavailable.
+        print(f"[sheets] erro ao sincronizar {action}: {error}", flush=True)
+
+
+def lead_row_from_whatsapp(message: WhatsAppPendingMessage) -> dict:
+    return {
+        "estado": "Aguardando validação",
+        "data_entrada": message.received_at,
+        "nome": message.profile_name,
+        "telefone": f"+{whatsapp_phone(message.from_phone)}",
+        "email": "",
+        "interesse": extract_procedure(message.text, ""),
+        "origem": "WhatsApp",
+        "canal": "WhatsApp",
+        "ultima_mensagem": message.text,
+        "ultima_interacao": message.received_at,
+        "approval_id": message.approval_id,
+        "message_id": message.message_id,
+        "notas": "",
+    }
+
+
+def sync_google_lead_from_whatsapp(message: WhatsAppPendingMessage) -> None:
+    if not google_sheets_enabled():
+        return
+    google_sheets_post("upsert_lead", lead_row_from_whatsapp(message))
+
+
+def sync_google_approval_sent(approval: dict) -> None:
+    if not google_sheets_enabled():
+        return
+    google_sheets_post(
+        "mark_contacted",
+        {
+            "estado": "Aguardando resposta",
+            "telefone": f"+{whatsapp_phone(str(approval.get('patient_phone', '')))}",
+            "nome": approval.get("patient_name", ""),
+            "ultima_interacao": datetime.now(timezone.utc).isoformat(),
+            "approval_id": approval.get("approval_id", ""),
+            "message_id": approval.get("source_message_id", ""),
+        },
+    )
 
 
 def fetch(limit: int) -> None:
@@ -960,6 +1030,7 @@ def handle_reviewer_commands(body: dict) -> None:
                 try:
                     result = whatsapp_api_request(whatsapp_text_payload(patient_phone, suggested_reply))
                     mark_approval_sent(approval_id, result)
+                    sync_google_approval_sent(approval)
 
                     patient_name = approval.get("patient_name") or patient_phone
                     confirmation = (
@@ -993,6 +1064,7 @@ def notify_reviewer(messages: list[WhatsAppPendingMessage]) -> None:
             continue
 
         message.approval_id = create_whatsapp_approval(message)
+        sync_google_lead_from_whatsapp(message)
         review_text = format_review_message(message)
         try:
             whatsapp_api_request(whatsapp_text_payload(reviewer, review_text))

@@ -26,3 +26,7 @@ services:
         value: 351938336026
       - key: REVIEWER_WHATSAPP
         value: 351913767718
+      - key: GOOGLE_SHEETS_WEBHOOK_URL
+        sync: false
+      - key: GOOGLE_SHEETS_WEBHOOK_SECRET
+        sync: false
