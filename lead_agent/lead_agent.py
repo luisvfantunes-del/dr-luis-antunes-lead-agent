@@ -241,7 +241,9 @@ def language_from_text(text: str) -> str:
 
 
 def suggested_reply(name: str, language: str, channel: str) -> str:
-    greeting_name = f" {name.split()[0]}" if name else ""
+    name_parts = (name or "").split()
+    first_name = name_parts[0] if name_parts else ""
+    greeting_name = f" {first_name}" if first_name else ""
     if language == "EN":
         return (
             f"Hello{greeting_name}! My name is Catia Correia, personal assistant to Dr. Luis Antunes.\n\n"
@@ -260,7 +262,8 @@ def suggested_reply(name: str, language: str, channel: str) -> str:
 
 def suggested_whatsapp_reply(name: str, text: str, message_type: str) -> str:
     language = language_from_text(text)
-    first_name = (name or "").split()[0]
+    name_parts = (name or "").split()
+    first_name = name_parts[0] if name_parts else ""
     greeting_name = f" {first_name}" if first_name else ""
 
     if message_type != "text":
@@ -910,67 +913,142 @@ class WhatsAppWebhookHandler(BaseHTTPRequestHandler):
         return
 
 
-def print_webhook_summary(body: dict) -> None:
-    for entry in body.get("entry", []):
+def webhook_payloads(body: object) -> list[dict]:
+    if isinstance(body, list):
+        return [item for item in body if isinstance(item, dict)]
+    if isinstance(body, dict):
+        return [body]
+    return []
+
+
+def whatsapp_message_content(message: dict) -> str:
+    message_type = message.get("type", "")
+    if message_type == "text":
+        return message.get("text", {}).get("body", "")
+    if message_type in {"image", "document", "audio", "video"}:
+        return message.get(message_type, {}).get("filename") or f"[{message_type}]"
+    return f"[{message_type or 'mensagem'}]"
+
+
+def iter_standard_whatsapp_messages(payload: dict) -> Iterable[tuple[str, dict, str]]:
+    for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             field = change.get("field", "")
-            value = change.get("value", {})
-            for message in value.get("messages", []):
-                sender = message.get("from", "-")
-                message_type = message.get("type", "-")
-                if message_type == "text":
-                    content = message.get("text", {}).get("body", "")
-                elif message_type in {"image", "document", "audio", "video"}:
-                    content = message.get(message_type, {}).get("filename") or message_type
-                else:
-                    content = message_type
-                print(f"[webhook] {field} | {sender} | {message_type}: {content}", flush=True)
-
-
-def extract_pending_whatsapp_messages(body: dict, received_at: str) -> list[WhatsAppPendingMessage]:
-    pending: list[WhatsAppPendingMessage] = []
-    reviewer = reviewer_phone()
-    clinic_number = whatsapp_phone(env("WHATSAPP_CLINIC_NUMBER", "351938336026"))
-    for entry in body.get("entry", []):
-        for change in entry.get("changes", []):
-            if change.get("field") != "messages":
-                continue
             value = change.get("value", {})
             contact_names = {
                 contact.get("wa_id", ""): contact.get("profile", {}).get("name", "")
                 for contact in value.get("contacts", [])
             }
             for message in value.get("messages", []):
-                message_type = message.get("type", "")
-                sender = message.get("from", "")
-                normalized_sender = whatsapp_phone(sender)
-                if reviewer and normalized_sender == reviewer:
-                    continue
-                if clinic_number and normalized_sender == clinic_number:
-                    continue
-                text = ""
-                if message_type == "text":
-                    text = message.get("text", {}).get("body", "")
-                elif message_type in {"image", "document", "audio", "video"}:
-                    text = message.get(message_type, {}).get("filename") or f"[{message_type}]"
-                else:
-                    text = f"[{message_type or 'mensagem'}]"
+                yield field, message, contact_names.get(message.get("from", ""), "")
 
-                profile_name = contact_names.get(sender, "")
-                language = language_from_text(text)
-                pending.append(
-                    WhatsAppPendingMessage(
-                        received_at=received_at,
-                        message_id=message.get("id", ""),
-                        from_phone=sender,
-                        profile_name=profile_name,
-                        message_type=message_type,
-                        text=text,
-                        language=language,
-                        suggested_reply=suggested_whatsapp_reply(profile_name, text, message_type),
-                        status="Aguardando validação",
-                    )
-                )
+
+def iter_360dialog_coexistence_messages(payload: dict) -> Iterable[tuple[str, dict, str]]:
+    event = payload.get("event", "")
+    if event == "history":
+        return
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        return
+    contact_names = {
+        contact.get("wa_id", ""): contact.get("profile", {}).get("name", "")
+        for contact in data.get("contacts", [])
+        if isinstance(contact, dict)
+    }
+    for message in data.get("messages", []):
+        if isinstance(message, dict):
+            yield event or "360dialog", message, contact_names.get(message.get("from", ""), "")
+
+
+def iter_incoming_whatsapp_messages(body: object) -> Iterable[tuple[str, dict, str]]:
+    for payload in webhook_payloads(body):
+        yield from iter_standard_whatsapp_messages(payload)
+        yield from iter_360dialog_coexistence_messages(payload)
+
+
+def print_webhook_summary(body: object) -> None:
+    payloads = webhook_payloads(body)
+    keys = [", ".join(payload.keys()) or "(vazio)" for payload in payloads]
+    print(f"[webhook] recebido | payloads: {len(payloads)} | chaves: {' / '.join(keys) or '(nenhum)'}", flush=True)
+    printed_details = False
+    for payload in payloads:
+        event = payload.get("event", "")
+        data = payload.get("data", {})
+        if isinstance(data, dict):
+            for message in data.get("messages", []):
+                if not isinstance(message, dict):
+                    continue
+                sender = message.get("from", "-")
+                message_type = message.get("type", "-")
+                content = whatsapp_message_content(message)
+                print(f"[webhook] {event or '360dialog'} | {sender} | {message_type}: {content}", flush=True)
+                printed_details = True
+            for message in data.get("message_echoes", []):
+                if not isinstance(message, dict):
+                    continue
+                recipient = message.get("to", "-")
+                message_type = message.get("type", "-")
+                content = whatsapp_message_content(message)
+                print(f"[webhook] {event or '360dialog'} | echo para {recipient} | {message_type}: {content}", flush=True)
+                printed_details = True
+            for status in data.get("statuses", []):
+                if not isinstance(status, dict):
+                    continue
+                recipient = status.get("recipient_id", "-")
+                status_value = status.get("status", "-")
+                print(f"[webhook] {event or '360dialog'} | {recipient} | status: {status_value}", flush=True)
+                printed_details = True
+
+        for entry in payload.get("entry", []):
+            if not isinstance(entry, dict):
+                continue
+            for change in entry.get("changes", []):
+                field = change.get("field", "")
+                value = change.get("value", {})
+                for message in value.get("messages", []):
+                    sender = message.get("from", "-")
+                    message_type = message.get("type", "-")
+                    content = whatsapp_message_content(message)
+                    print(f"[webhook] {field} | {sender} | {message_type}: {content}", flush=True)
+                    printed_details = True
+                for status in value.get("statuses", []):
+                    recipient = status.get("recipient_id", "-")
+                    status_value = status.get("status", "-")
+                    print(f"[webhook] {field} | {recipient} | status: {status_value}", flush=True)
+                    printed_details = True
+    if not printed_details:
+        excerpt = json.dumps(body, ensure_ascii=False)[:500]
+        print(f"[webhook] sem mensagens/statuses reconhecidos | {excerpt}", flush=True)
+
+
+def extract_pending_whatsapp_messages(body: object, received_at: str) -> list[WhatsAppPendingMessage]:
+    pending: list[WhatsAppPendingMessage] = []
+    reviewer = reviewer_phone()
+    clinic_number = whatsapp_phone(env("WHATSAPP_CLINIC_NUMBER", "351938336026"))
+    for _field, message, profile_name in iter_incoming_whatsapp_messages(body):
+        message_type = message.get("type", "")
+        sender = message.get("from", "")
+        normalized_sender = whatsapp_phone(sender)
+        if reviewer and normalized_sender == reviewer:
+            continue
+        if clinic_number and normalized_sender == clinic_number:
+            continue
+
+        text = whatsapp_message_content(message)
+        language = language_from_text(text)
+        pending.append(
+            WhatsAppPendingMessage(
+                received_at=received_at,
+                message_id=message.get("id", ""),
+                from_phone=sender,
+                profile_name=profile_name,
+                message_type=message_type,
+                text=text,
+                language=language,
+                suggested_reply=suggested_whatsapp_reply(profile_name, text, message_type),
+                status="Aguardando validação",
+            )
+        )
     return pending
 
 
