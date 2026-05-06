@@ -475,7 +475,23 @@ def google_sheets_post(action: str, payload: dict) -> None:
     )
     try:
         with urllib.request.urlopen(request, timeout=DEFAULT_GOOGLE_SHEETS_TIMEOUT) as response:
-            response.read()
+            raw_response = response.read().decode("utf-8", errors="replace")
+        if raw_response:
+            try:
+                result = json.loads(raw_response)
+            except json.JSONDecodeError:
+                print(
+                    f"[sheets] resposta nao JSON em {action}: {raw_response[:300]}",
+                    flush=True,
+                )
+                return
+            if result.get("ok") is False:
+                print(
+                    f"[sheets] resposta sem sucesso em {action}: {raw_response[:500]}",
+                    flush=True,
+                )
+                return
+        print(f"[sheets] sincronizado {action}", flush=True)
     except Exception as error:
         # The WhatsApp flow must not fail just because the tracker is temporarily unavailable.
         print(f"[sheets] erro ao sincronizar {action}: {error}", flush=True)
